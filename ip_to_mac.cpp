@@ -16,12 +16,26 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <vector>
+
+constexpr int NO_NEGATIVE_1 = -1;
+constexpr int NO_0 = 0;
+constexpr int NO_1 = 1;
+constexpr int NO_2 = 2;
+constexpr int NO_3 = 3;
+constexpr int NO_6 = 6;
+constexpr int NO_9 = 9;
+constexpr int NO_32 = 32;
+constexpr int NO_128 = 128;
+constexpr std::size_t NO_1024 = 1024;
+constexpr useconds_t NO_100000 = 100000;
+constexpr suseconds_t NO_300000 = 300000;
+constexpr char NO_ZERO_CHAR = '0';
 
 enum Source {
     Local,
@@ -40,44 +54,49 @@ struct RouteInfo {
     bool hasGateway = false;
     std::string gatewayIp;
     std::string interfaceName;
-    int interfaceIndex = 0;
+    int interfaceIndex = NO_0;
     std::uint32_t tableId = RT_TABLE_UNSPEC;
-    int prefixLength = -1;
-    std::uint32_t routePriority = UINT32_MAX;
 };
 
 struct ParsedRouteAttrs {
     bool hasGateway = false;
     bool hasOif = false;
-    bool matchesTarget = false;
     in_addr v4{};
     in6_addr v6{};
-    int oif = 0;
+    int oif = NO_0;
     std::uint32_t tableId = RT_TABLE_UNSPEC;
-    std::uint32_t routePriority = UINT32_MAX;
 };
 
 struct RouteLookupOptions {
-    std::uint32_t tableId = RT_TABLE_UNSPEC;
-    bool hasSource = false;
     in_addr sourceV4{};
     in6_addr sourceV6{};
-    int outputInterfaceIndex = 0;
+    int outputInterfaceIndex = NO_0;
 };
 
 struct LocalAddressCandidate {
     std::string interfaceName;
-    int interfaceIndex = 0;
+    int interfaceIndex = NO_0;
     in_addr v4{};
     in6_addr v6{};
 };
 
-constexpr std::size_t kNetlinkBufferSize = 32 * 1024;
-constexpr int kNeighborProbeRetries = 3;
-constexpr useconds_t kNeighborProbeRetryDelayUs = 200000;
+struct ParsedIpLiteral {
+    std::string original;
+    std::string normalized;
+    int family = AF_UNSPEC;
+    in_addr v4{};
+    in6_addr v6{};
+};
 
-bool Ipv4MatchesPrefix(const in_addr& ip, const in_addr& network, int prefixLength);
-bool Ipv6MatchesPrefix(const in6_addr& ip, const in6_addr& network, int prefixLength);
+struct MacResolveRequest {
+    ParsedIpLiteral localServiceIp;
+    ParsedIpLiteral tcpSourceIp;
+};
+
+constexpr std::size_t kNetlinkBufferSize = NO_32 * NO_1024;
+constexpr int kNeighborProbeRetries = NO_1;
+constexpr useconds_t kNeighborProbeRetryDelayUs = NO_100000;
+
 std::optional<MacLookupResult> FindNeighborMac(int family,
                                                int expectedIfindex,
                                                const in_addr& v4,
@@ -91,7 +110,30 @@ std::size_t FamilyAddressSize(int family)
     if (family == AF_INET6) {
         return sizeof(in6_addr);
     }
-    return 0;
+    return NO_0;
+}
+
+std::optional<int> NetlinkPayloadLength(const nlmsghdr* nlh, std::size_t headerSize)
+{
+    const std::size_t alignedHeaderSize = NLMSG_LENGTH(headerSize);
+    if (nlh->nlmsg_len < alignedHeaderSize) {
+        return std::nullopt;
+    }
+    const std::size_t payloadLength = nlh->nlmsg_len - alignedHeaderSize;
+    if (payloadLength > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return std::nullopt;
+    }
+    return static_cast<int>(payloadLength);
+}
+
+std::uint16_t RtAttrLength(std::size_t payloadLength)
+{
+    return static_cast<std::uint16_t>(RTA_LENGTH(payloadLength));
+}
+
+std::uint32_t AlignedNetlinkLength(std::uint32_t currentLength, std::size_t payloadLength)
+{
+    return static_cast<std::uint32_t>(NLMSG_ALIGN(currentLength) + RTA_LENGTH(payloadLength));
 }
 
 /**
@@ -103,12 +145,12 @@ std::size_t FamilyAddressSize(int family)
 std::string FormatMac(const unsigned char* bytes, std::size_t len)
 {
     std::ostringstream oss;
-    oss << std::hex << std::setfill('0');
-    for (std::size_t i = 0; i < len; ++i) {
-        if (i != 0) {
+    oss << std::hex << std::setfill(NO_ZERO_CHAR);
+    for (std::size_t i = NO_0; i < len; ++i) {
+        if (i != NO_0) {
             oss << ':';
         }
-        oss << std::setw(2) << static_cast<unsigned int>(bytes[i]);
+        oss << std::setw(NO_2) << static_cast<unsigned int>(bytes[i]);
     }
     return oss.str();
 }
@@ -128,15 +170,44 @@ bool SockaddrEqualsIp(const sockaddr* addr, int family, const void* rawIp)
 
     if (family == AF_INET) {
         const auto* in = reinterpret_cast<const sockaddr_in*>(addr);
-        return std::memcmp(&in->sin_addr, rawIp, sizeof(in_addr)) == 0;
+        return std::memcmp(&in->sin_addr, rawIp, sizeof(in_addr)) == NO_0;
     }
 
     if (family == AF_INET6) {
         const auto* in6 = reinterpret_cast<const sockaddr_in6*>(addr);
-        return std::memcmp(&in6->sin6_addr, rawIp, sizeof(in6_addr)) == 0;
+        return std::memcmp(&in6->sin6_addr, rawIp, sizeof(in6_addr)) == NO_0;
     }
 
     return false;
+}
+
+std::string NormalizeIpLiteral(const std::string& ip)
+{
+    std::string normalized = ip;
+    if (!ip.empty() && ip.front() == '[') {
+        const std::size_t closeBracket = ip.find(']');
+        if (closeBracket != std::string::npos && closeBracket > NO_1) {
+            normalized = ip.substr(NO_1, closeBracket - NO_1);
+        } else {
+            std::cerr << "NormalizeIpLiteral: invalid bracketed IP literal" << std::endl;
+        }
+    }
+    return normalized;
+}
+
+ParsedIpLiteral ParseIpLiteral(const std::string& ip, const char* label)
+{
+    ParsedIpLiteral parsed;
+    parsed.original = ip;
+    parsed.normalized = NormalizeIpLiteral(ip);
+    if (::inet_pton(AF_INET, parsed.normalized.c_str(), &parsed.v4) == NO_1) {
+        parsed.family = AF_INET;
+    } else if (::inet_pton(AF_INET6, parsed.normalized.c_str(), &parsed.v6) == NO_1) {
+        parsed.family = AF_INET6;
+    } else {
+        std::cerr << "ParseIpLiteral: invalid " << label << std::endl;
+    }
+    return parsed;
 }
 
 /**
@@ -148,68 +219,18 @@ bool SockaddrEqualsIp(const sockaddr* addr, int family, const void* rawIp)
  */
 int DetectFamily(const std::string& ip, in_addr* v4, in6_addr* v6)
 {
-    if (inet_pton(AF_INET, ip.c_str(), v4) == 1) {
-        return AF_INET;
+    const ParsedIpLiteral parsed = ParseIpLiteral(ip, "IP address");
+    if (parsed.family == AF_INET) {
+        *v4 = parsed.v4;
+    } else if (parsed.family == AF_INET6) {
+        *v6 = parsed.v6;
     }
-    if (inet_pton(AF_INET6, ip.c_str(), v6) == 1) {
-        return AF_INET6;
-    }
-    return AF_UNSPEC;
+    return parsed.family;
 }
 
 void PrintUsage(const char* argv0)
 {
-    std::cerr << "Usage: " << argv0 << " <IPv4-or-IPv6>\n";
-}
-
-/**
- * @brief 判断 IPv4 地址是否命中指定前缀。
- * @param ip 目标 IPv4 地址。
- * @param network 路由前缀地址。
- * @param prefixLength 前缀长度。
- * @return 命中时返回 true，否则返回 false。
- */
-bool Ipv4MatchesPrefix(const in_addr& ip, const in_addr& network, int prefixLength)
-{
-    if (prefixLength < 0 || prefixLength > 32) {
-        return false;
-    }
-
-    const std::uint32_t mask =
-        (prefixLength == 0) ? 0U : (0xFFFFFFFFU << (32 - static_cast<unsigned int>(prefixLength)));
-    const std::uint32_t ipValue = ntohl(ip.s_addr);
-    const std::uint32_t netValue = ntohl(network.s_addr);
-    return (ipValue & mask) == (netValue & mask);
-}
-
-/**
- * @brief 判断 IPv6 地址是否命中指定前缀。
- * @param ip 目标 IPv6 地址。
- * @param network 路由前缀地址。
- * @param prefixLength 前缀长度。
- * @return 命中时返回 true，否则返回 false。
- */
-bool Ipv6MatchesPrefix(const in6_addr& ip, const in6_addr& network, int prefixLength)
-{
-    if (prefixLength < 0 || prefixLength > 128) {
-        return false;
-    }
-
-    int bitsLeft = prefixLength;
-    for (int i = 0; i < 16; ++i) {
-        if (bitsLeft <= 0) {
-            return true;
-        }
-
-        const int bitsThisByte = (bitsLeft >= 8) ? 8 : bitsLeft;
-        const unsigned char mask = static_cast<unsigned char>(0xFFU << (8 - bitsThisByte));
-        if ((ip.s6_addr[i] & mask) != (network.s6_addr[i] & mask)) {
-            return false;
-        }
-        bitsLeft -= bitsThisByte;
-    }
-
-    return true;
+    std::cerr << "Usage: " << argv0 << " <local-service-IP> <tcp-source-IP>\n";
 }
 
 class NetlinkSocket {
@@ -227,7 +248,7 @@ public:
      */
     ~NetlinkSocket()
     {
-        if (fd_ >= 0) {
+        if (fd_ >= NO_0) {
             ::close(fd_);
         }
     }
@@ -242,7 +263,7 @@ public:
     }
 
 private:
-    int fd_ = -1;
+    int fd_ = NO_NEGATIVE_1;
 };
 
 class IfaddrsGuard {
@@ -304,6 +325,90 @@ std::string SourceToString(Source source)
     return "unknown";
 }
 
+std::string FormatErrno(int errorNumber)
+{
+    return std::to_string(errorNumber) + " (" + std::strerror(errorNumber) + ")";
+}
+
+std::optional<LocalAddressCandidate> FindLocalAddressCandidateByIp(int family,
+                                                                    const in_addr& v4,
+                                                                    const in6_addr& v6)
+{
+    IfaddrsGuard ifaddrsGuard;
+    if (::getifaddrs(ifaddrsGuard.out()) != NO_0) {
+        std::cerr << "FindLocalAddressCandidateByIp: getifaddrs failed" << std::endl;
+        return std::nullopt;
+    }
+
+    const void* rawIp = family == AF_INET ? static_cast<const void*>(&v4)
+                                          : static_cast<const void*>(&v6);
+    for (ifaddrs* it = ifaddrsGuard.get(); it != nullptr; it = it->ifa_next) {
+        if (it->ifa_name == nullptr || it->ifa_addr == nullptr ||
+            it->ifa_addr->sa_family != family) {
+            continue;
+        }
+        if (!SockaddrEqualsIp(it->ifa_addr, family, rawIp)) {
+            continue;
+        }
+
+        LocalAddressCandidate candidate;
+        candidate.interfaceName = it->ifa_name;
+        candidate.interfaceIndex = ::if_nametoindex(it->ifa_name);
+        if (candidate.interfaceIndex <= NO_0) {
+            std::cerr << "FindLocalAddressCandidateByIp: if_nametoindex failed for "
+                      << candidate.interfaceName << std::endl;
+            return std::nullopt;
+        }
+        if (family == AF_INET) {
+            candidate.v4 = v4;
+        } else {
+            candidate.v6 = v6;
+        }
+        return candidate;
+    }
+    return std::nullopt;
+}
+
+std::optional<RouteLookupOptions> BuildSourceRouteOptions(const ParsedIpLiteral& sourceIp,
+                                                          int targetFamily)
+{
+    if (sourceIp.family == AF_UNSPEC) {
+        std::cerr << "BuildSourceRouteOptions: invalid local service IP" << std::endl;
+        return std::nullopt;
+    }
+    if (sourceIp.family != targetFamily) {
+        std::cerr << "BuildSourceRouteOptions: local service IP family does not match target IP"
+                  << std::endl;
+        return std::nullopt;
+    }
+
+    RouteLookupOptions options;
+    if (targetFamily == AF_INET) {
+        options.sourceV4 = sourceIp.v4;
+    } else {
+        options.sourceV6 = sourceIp.v6;
+    }
+
+    const auto sourceCandidate =
+        FindLocalAddressCandidateByIp(targetFamily, sourceIp.v4, sourceIp.v6);
+    if (sourceCandidate.has_value()) {
+        options.outputInterfaceIndex = sourceCandidate->interfaceIndex;
+    } else {
+        std::cerr << "BuildSourceRouteOptions: local service IP not found on local interfaces"
+                  << std::endl;
+    }
+    return options;
+}
+
+MacResolveRequest BuildMacResolveRequest(const std::string& localServiceIp,
+                                         const std::string& tcpSourceIp)
+{
+    return MacResolveRequest{
+        ParseIpLiteral(localServiceIp, "local service IP"),
+        ParseIpLiteral(tcpSourceIp, "tcp source IP"),
+    };
+}
+
 /**
  * @brief 从 netlink socket 读取一批消息到缓冲区。
  * @param sock netlink socket 封装对象。
@@ -314,8 +419,8 @@ bool ReceiveNetlinkBuffer(NetlinkSocket& sock, std::vector<char>* buffer)
 {
     bool retry = true;
     while (retry) {
-        const ssize_t received = ::recv(sock.get(), buffer->data(), buffer->size(), 0);
-        if (received >= 0) {
+        const ssize_t received = ::recv(sock.get(), buffer->data(), buffer->size(), NO_0);
+        if (received >= NO_0) {
             buffer->resize(static_cast<std::size_t>(received));
             return true;
         }
@@ -349,7 +454,7 @@ bool ParseRouteGatewayAttr(int family, const rtattr* attr, ParsedRouteAttrs* par
 {
     const auto addressSize = FamilyAddressSize(family);
     const auto payloadSize = static_cast<std::size_t>(RTA_PAYLOAD(attr));
-    if (addressSize == 0 || payloadSize != addressSize) {
+    if (addressSize == NO_0 || payloadSize != addressSize) {
         return true;
     }
 
@@ -384,25 +489,6 @@ bool ParseRouteOifAttr(const rtattr* attr, ParsedRouteAttrs* parsed)
     }
 
     parsed->hasOif = true;
-    return true;
-}
-
-/**
- * @brief 处理 RTA_PRIORITY，提取路由优先级供候选路由比较使用。
- */
-bool ParseRoutePriorityAttr(const rtattr* attr, ParsedRouteAttrs* parsed)
-{
-    if (RTA_PAYLOAD(attr) != static_cast<int>(sizeof(parsed->routePriority))) {
-        return true;
-    }
-
-    if (std::memcpy(&parsed->routePriority,
-                    RTA_DATA(attr),
-                    sizeof(parsed->routePriority)) != &parsed->routePriority) {
-        std::cerr << "ParseRouteAttrs: memcpy routePriority failed" << std::endl;
-        return false;
-    }
-
     return true;
 }
 
@@ -452,12 +538,6 @@ std::optional<ParsedRouteAttrs> ParseRouteAttrs(const rtmsg* rtm,
                 }
                 break;
 
-            case RTA_PRIORITY:
-                if (!ParseRoutePriorityAttr(attr, &parsed)) {
-                    return std::nullopt;
-                }
-                break;
-
             case RTA_TABLE:
                 if (!ParseRouteTableAttr(attr, &parsed)) {
                     return std::nullopt;
@@ -471,24 +551,16 @@ std::optional<ParsedRouteAttrs> ParseRouteAttrs(const rtmsg* rtm,
     if (parsed.tableId == RT_TABLE_UNSPEC) {
         parsed.tableId = RT_TABLE_MAIN;
     }
-    parsed.matchesTarget = true;
     return parsed;
-}
-
-bool RouteMatchesTarget(const ParsedRouteAttrs& parsed)
-{
-    return parsed.hasOif && parsed.matchesTarget;
 }
 
 /**
  * @brief 将命中的路由消息组装为 RouteInfo。
- * @param rtm 路由消息头。
  * @param family 地址族。
  * @param parsed 已解析的路由属性。
  * @return 组装成功返回 RouteInfo，失败返回空 optional。
  */
-std::optional<RouteInfo> BuildRouteInfo(const rtmsg* rtm,
-                                        int family,
+std::optional<RouteInfo> BuildRouteInfo(int family,
                                         const ParsedRouteAttrs& parsed)
 {
     const std::string ifName = GetInterfaceName(parsed.oif);
@@ -511,8 +583,6 @@ std::optional<RouteInfo> BuildRouteInfo(const rtmsg* rtm,
         ifName,
         parsed.oif,
         parsed.tableId,
-        static_cast<int>(rtm->rtm_dst_len),
-        parsed.routePriority,
     };
 }
 
@@ -527,7 +597,7 @@ void InitNeighborRequest(nlmsghdr* nlh, ndmsg* ndm, int family)
     nlh->nlmsg_len = NLMSG_LENGTH(sizeof(ndmsg));
     nlh->nlmsg_type = RTM_GETNEIGH;
     nlh->nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
-    nlh->nlmsg_seq = 1;
+    nlh->nlmsg_seq = NO_1;
     ndm->ndm_family = static_cast<unsigned char>(family);
 }
 
@@ -535,29 +605,38 @@ bool SendNetlinkDump(NetlinkSocket& sock, const void* req, std::size_t len)
 {
     sockaddr_nl addr{};
     addr.nl_family = AF_NETLINK;
-    return ::sendto(sock.get(), req, len, 0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) >= 0;
+    return ::sendto(sock.get(), req, len, NO_0, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) >=
+           NO_0;
 }
 
 bool BindProbeSocketToSource(int fd, int family, const RouteLookupOptions& options)
 {
-    if (!options.hasSource) {
-        return true;
-    }
-
     if (family == AF_INET) {
         sockaddr_in local{};
         local.sin_family = AF_INET;
-        local.sin_port = 0;
+        local.sin_port = NO_0;
         local.sin_addr = options.sourceV4;
-        return ::bind(fd, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == 0;
+        if (::bind(fd, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == NO_0) {
+            return true;
+        }
+    const int savedErrno = errno;
+        std::cerr << "BindProbeSocketToSource: bind IPv4 source failed, errno="
+                  << FormatErrno(savedErrno) << std::endl;
+        return false;
     }
 
     if (family == AF_INET6) {
         sockaddr_in6 local{};
         local.sin6_family = AF_INET6;
-        local.sin6_port = 0;
+        local.sin6_port = NO_0;
         local.sin6_addr = options.sourceV6;
-        return ::bind(fd, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == 0;
+        if (::bind(fd, reinterpret_cast<const sockaddr*>(&local), sizeof(local)) == NO_0) {
+            return true;
+        }
+        const int savedErrno = errno;
+        std::cerr << "BindProbeSocketToSource: bind IPv6 source failed, errno="
+                  << FormatErrno(savedErrno) << std::endl;
+        return false;
     }
 
     return false;
@@ -568,15 +647,17 @@ bool TriggerNeighborProbe(int family,
                           const in_addr& v4,
                           const in6_addr& v6)
 {
-    const int fd = ::socket(family, SOCK_DGRAM, 0);
-    if (fd < 0) {
-        std::cerr << "TriggerNeighborProbe: socket(SOCK_DGRAM) failed" << std::endl;
+    const int fd = ::socket(family, SOCK_DGRAM, NO_0);
+    if (fd < NO_0) {
+        const int savedErrno = errno;
+        std::cerr << "TriggerNeighborProbe: socket(SOCK_DGRAM) failed, errno="
+                  << FormatErrno(savedErrno) << std::endl;
         return false;
     }
 
     timeval timeout{};
-    timeout.tv_sec = 0;
-    timeout.tv_usec = 300000;
+    timeout.tv_sec = NO_0;
+    timeout.tv_usec = NO_300000;
     (void)::setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
 
     bool success = false;
@@ -586,50 +667,44 @@ bool TriggerNeighborProbe(int family,
         return false;
     }
 
-    unsigned char probeByte = 0;
+    unsigned char probeByte = NO_0;
+    int sendErrno = NO_0;
     if (family == AF_INET) {
-        char ipText[INET_ADDRSTRLEN] = {};
-        if (::inet_ntop(AF_INET, &v4, ipText, sizeof(ipText)) != nullptr) {
-            std::cerr << "TriggerNeighborProbe: sending UDP probe to " << ipText << std::endl;
-        } else {
-            std::cerr << "TriggerNeighborProbe: sending UDP probe to IPv4 target" << std::endl;
-        }
-
         sockaddr_in remote{};
         remote.sin_family = AF_INET;
-        remote.sin_port = htons(9);
+        remote.sin_port = htons(NO_9);
         remote.sin_addr = v4;
-        success = ::sendto(fd,
-                           &probeByte,
-                           sizeof(probeByte),
-                           0,
-                           reinterpret_cast<const sockaddr*>(&remote),
-                           sizeof(remote)) >= 0;
-    } else if (family == AF_INET6) {
-        char ipText[INET6_ADDRSTRLEN] = {};
-        if (::inet_ntop(AF_INET6, &v6, ipText, sizeof(ipText)) != nullptr) {
-            std::cerr << "TriggerNeighborProbe: sending UDP probe to " << ipText << std::endl;
-        } else {
-            std::cerr << "TriggerNeighborProbe: sending UDP probe to IPv6 target" << std::endl;
+        const ssize_t sent = ::sendto(fd,
+                                      &probeByte,
+                                      sizeof(probeByte),
+                                      NO_0,
+                                      reinterpret_cast<const sockaddr*>(&remote),
+                                      sizeof(remote));
+        success = sent >= NO_0;
+        if (!success) {
+            sendErrno = errno;
         }
-
+    } else if (family == AF_INET6) {
         sockaddr_in6 remote{};
         remote.sin6_family = AF_INET6;
-        remote.sin6_port = htons(9);
+        remote.sin6_port = htons(NO_9);
         remote.sin6_addr = v6;
-        success = ::sendto(fd,
-                           &probeByte,
-                           sizeof(probeByte),
-                           0,
-                           reinterpret_cast<const sockaddr*>(&remote),
-                           sizeof(remote)) >= 0;
+        const ssize_t sent = ::sendto(fd,
+                                      &probeByte,
+                                      sizeof(probeByte),
+                                      NO_0,
+                                      reinterpret_cast<const sockaddr*>(&remote),
+                                      sizeof(remote));
+        success = sent >= NO_0;
+        if (!success) {
+            sendErrno = errno;
+        }
     }
 
     ::close(fd);
     if (!success) {
-        std::cerr << "TriggerNeighborProbe: sendto(probe) failed" << std::endl;
-    } else {
-        std::cerr << "TriggerNeighborProbe: probe sent successfully" << std::endl;
+        std::cerr << "TriggerNeighborProbe: sendto(probe) failed, errno="
+                  << FormatErrno(sendErrno) << std::endl;
     }
     return success;
 }
@@ -644,9 +719,7 @@ std::optional<MacLookupResult> RetryNeighborLookupAfterProbe(int family,
         return std::nullopt;
     }
 
-    for (int attempt = 0; attempt < kNeighborProbeRetries; ++attempt) {
-        std::cerr << "RetryNeighborLookupAfterProbe: retry " << (attempt + 1) << "/"
-                  << kNeighborProbeRetries << std::endl;
+    for (int attempt = NO_0; attempt < kNeighborProbeRetries; ++attempt) {
         ::usleep(kNeighborProbeRetryDelayUs);
         auto result = FindNeighborMac(family, expectedIfindex, v4, v6);
         if (result.has_value()) {
@@ -679,12 +752,12 @@ std::optional<MacLookupResult> ParseNeighborResult(const nlmsghdr* nlh,
     if (ndm->ndm_family != family) {
         return std::nullopt;
     }
-    if (expectedIfindex > 0 && ndm->ndm_ifindex != expectedIfindex) {
+    if (expectedIfindex > NO_0 && ndm->ndm_ifindex != expectedIfindex) {
         return std::nullopt;
     }
 
-    const int payloadLen = nlh->nlmsg_len - NLMSG_LENGTH(sizeof(*ndm));
-    if (payloadLen < 0) {
+    const auto payloadLen = NetlinkPayloadLength(nlh, sizeof(*ndm));
+    if (!payloadLen.has_value()) {
         return std::nullopt;
     }
 
@@ -693,17 +766,17 @@ std::optional<MacLookupResult> ParseNeighborResult(const nlmsghdr* nlh,
     bool ipMatch = false;
     std::optional<std::string> macAddress;
 
-    for (int len = payloadLen; RTA_OK(attr, len); attr = RTA_NEXT(attr, len)) {
+    for (int len = *payloadLen; RTA_OK(attr, len); attr = RTA_NEXT(attr, len)) {
         if (attr->rta_type == NDA_DST && family == AF_INET &&
             RTA_PAYLOAD(attr) == static_cast<int>(sizeof(in_addr)) &&
-            std::memcmp(RTA_DATA(attr), &v4, sizeof(v4)) == 0) {
+            std::memcmp(RTA_DATA(attr), &v4, sizeof(v4)) == NO_0) {
             ipMatch = true;
         } else if (attr->rta_type == NDA_DST && family == AF_INET6 &&
                    RTA_PAYLOAD(attr) == static_cast<int>(sizeof(in6_addr)) &&
-                   std::memcmp(RTA_DATA(attr), &v6, sizeof(v6)) == 0) {
+                   std::memcmp(RTA_DATA(attr), &v6, sizeof(v6)) == NO_0) {
             ipMatch = true;
-        } else if (attr->rta_type == NDA_LLADDR && RTA_PAYLOAD(attr) == 6) {
-            macAddress = FormatMac(reinterpret_cast<const unsigned char*>(RTA_DATA(attr)), 6);
+        } else if (attr->rta_type == NDA_LLADDR && RTA_PAYLOAD(attr) == NO_6) {
+            macAddress = FormatMac(reinterpret_cast<const unsigned char*>(RTA_DATA(attr)), NO_6);
         }
     }
 
@@ -730,47 +803,39 @@ bool SendRouteLookupRequest(NetlinkSocket& sock,
     req.nlh.nlmsg_len = NLMSG_LENGTH(sizeof(rtmsg));
     req.nlh.nlmsg_type = RTM_GETROUTE;
     req.nlh.nlmsg_flags = NLM_F_REQUEST;
-    req.nlh.nlmsg_seq = 2;
+    req.nlh.nlmsg_seq = NO_2;
     req.rtm.rtm_family = static_cast<unsigned char>(family);
-    req.rtm.rtm_dst_len = family == AF_INET ? 32 : 128;
-    if (options.hasSource) {
-        req.rtm.rtm_src_len = family == AF_INET ? 32 : 128;
-    }
-    if (options.tableId <= 0xFFU) {
-        req.rtm.rtm_table = static_cast<unsigned char>(options.tableId);
-    } else {
-        req.rtm.rtm_table = RT_TABLE_UNSPEC;
-    }
+    req.rtm.rtm_dst_len = family == AF_INET ? NO_32 : NO_128;
+    req.rtm.rtm_src_len = family == AF_INET ? NO_32 : NO_128;
+    req.rtm.rtm_table = RT_TABLE_UNSPEC;
     const void* rawIp = family == AF_INET ? static_cast<const void*>(&v4)
                                           : static_cast<const void*>(&v6);
     auto* attr = reinterpret_cast<rtattr*>(
         reinterpret_cast<char*>(&req.nlh) + NLMSG_ALIGN(req.nlh.nlmsg_len));
     const auto dataLen = FamilyAddressSize(family);
     attr->rta_type = RTA_DST;
-    attr->rta_len = RTA_LENGTH(dataLen);
+    attr->rta_len = RtAttrLength(dataLen);
     if (std::memcpy(RTA_DATA(attr), rawIp, dataLen) != RTA_DATA(attr)) {
         std::cerr << "SendRouteLookupRequest: memcpy RTA_DST failed" << std::endl;
         return false;
     }
-    req.nlh.nlmsg_len = NLMSG_ALIGN(req.nlh.nlmsg_len) + RTA_LENGTH(dataLen);
-    if (options.hasSource) {
-        attr = reinterpret_cast<rtattr*>(
-            reinterpret_cast<char*>(&req.nlh) + NLMSG_ALIGN(req.nlh.nlmsg_len));
-        attr->rta_type = RTA_SRC;
-        attr->rta_len = RTA_LENGTH(dataLen);
-        const void* rawSource = family == AF_INET ? static_cast<const void*>(&options.sourceV4)
-                                                  : static_cast<const void*>(&options.sourceV6);
-        if (std::memcpy(RTA_DATA(attr), rawSource, dataLen) != RTA_DATA(attr)) {
-            std::cerr << "SendRouteLookupRequest: memcpy RTA_SRC failed" << std::endl;
-            return false;
-        }
-        req.nlh.nlmsg_len = NLMSG_ALIGN(req.nlh.nlmsg_len) + RTA_LENGTH(dataLen);
+    req.nlh.nlmsg_len = AlignedNetlinkLength(req.nlh.nlmsg_len, dataLen);
+    attr = reinterpret_cast<rtattr*>(
+        reinterpret_cast<char*>(&req.nlh) + NLMSG_ALIGN(req.nlh.nlmsg_len));
+    attr->rta_type = RTA_SRC;
+    attr->rta_len = RtAttrLength(dataLen);
+    const void* rawSource = family == AF_INET ? static_cast<const void*>(&options.sourceV4)
+                                              : static_cast<const void*>(&options.sourceV6);
+    if (std::memcpy(RTA_DATA(attr), rawSource, dataLen) != RTA_DATA(attr)) {
+        std::cerr << "SendRouteLookupRequest: memcpy RTA_SRC failed" << std::endl;
+        return false;
     }
-    if (options.outputInterfaceIndex > 0) {
+    req.nlh.nlmsg_len = AlignedNetlinkLength(req.nlh.nlmsg_len, dataLen);
+    if (options.outputInterfaceIndex > NO_0) {
         attr = reinterpret_cast<rtattr*>(
             reinterpret_cast<char*>(&req.nlh) + NLMSG_ALIGN(req.nlh.nlmsg_len));
         attr->rta_type = RTA_OIF;
-        attr->rta_len = RTA_LENGTH(sizeof(options.outputInterfaceIndex));
+        attr->rta_len = RtAttrLength(sizeof(options.outputInterfaceIndex));
         if (std::memcpy(RTA_DATA(attr),
                         &options.outputInterfaceIndex,
                         sizeof(options.outputInterfaceIndex)) != RTA_DATA(attr)) {
@@ -778,136 +843,9 @@ bool SendRouteLookupRequest(NetlinkSocket& sock,
             return false;
         }
         req.nlh.nlmsg_len =
-            NLMSG_ALIGN(req.nlh.nlmsg_len) + RTA_LENGTH(sizeof(options.outputInterfaceIndex));
-    }
-    if (options.tableId != RT_TABLE_UNSPEC && options.tableId > 0xFFU) {
-        attr = reinterpret_cast<rtattr*>(
-            reinterpret_cast<char*>(&req.nlh) + NLMSG_ALIGN(req.nlh.nlmsg_len));
-        attr->rta_type = RTA_TABLE;
-        attr->rta_len = RTA_LENGTH(sizeof(options.tableId));
-        if (std::memcpy(RTA_DATA(attr), &options.tableId, sizeof(options.tableId)) !=
-            RTA_DATA(attr)) {
-            std::cerr << "SendRouteLookupRequest: memcpy RTA_TABLE failed" << std::endl;
-            return false;
-        }
-        req.nlh.nlmsg_len = NLMSG_ALIGN(req.nlh.nlmsg_len) + RTA_LENGTH(sizeof(options.tableId));
+            AlignedNetlinkLength(req.nlh.nlmsg_len, sizeof(options.outputInterfaceIndex));
     }
     return SendNetlinkDump(sock, &req, req.nlh.nlmsg_len);
-}
-
-/**
- * @brief 通过 UDP connect 让内核完成一次真实路由选择，并提取本地源地址。
- * @param family 地址族。
- * @param v4 目标 IPv4 地址。
- * @param v6 目标 IPv6 地址。
- * @param options 路由查询选项，成功时写入 source 地址。
- * @return 成功返回 true，否则返回 false。
- */
-bool DetectPreferredSource(int family,
-                           const in_addr& v4,
-                           const in6_addr& v6,
-                           RouteLookupOptions* options)
-{
-    const int fd = ::socket(family, SOCK_DGRAM, 0);
-    if (fd < 0) {
-        std::cerr << "DetectPreferredSource: socket(SOCK_DGRAM) failed" << std::endl;
-        return false;
-    }
-
-    bool success = false;
-    if (family == AF_INET) {
-        sockaddr_in remote{};
-        remote.sin_family = AF_INET;
-        remote.sin_port = htons(9);
-        remote.sin_addr = v4;
-        if (::connect(fd, reinterpret_cast<const sockaddr*>(&remote), sizeof(remote)) == 0) {
-            sockaddr_in local{};
-            socklen_t localLen = sizeof(local);
-            if (::getsockname(fd, reinterpret_cast<sockaddr*>(&local), &localLen) == 0) {
-                options->sourceV4 = local.sin_addr;
-                options->hasSource = true;
-                success = true;
-            }
-        }
-    } else if (family == AF_INET6) {
-        sockaddr_in6 remote{};
-        remote.sin6_family = AF_INET6;
-        remote.sin6_port = htons(9);
-        remote.sin6_addr = v6;
-        if (::connect(fd, reinterpret_cast<const sockaddr*>(&remote), sizeof(remote)) == 0) {
-            sockaddr_in6 local{};
-            socklen_t localLen = sizeof(local);
-            if (::getsockname(fd, reinterpret_cast<sockaddr*>(&local), &localLen) == 0) {
-                options->sourceV6 = local.sin6_addr;
-                options->hasSource = true;
-                success = true;
-            }
-        }
-    }
-
-    ::close(fd);
-    if (!success) {
-        std::cerr << "DetectPreferredSource: failed to derive preferred source address" << std::endl;
-    }
-    return success;
-}
-
-/**
- * @brief 枚举本机指定地址族的所有单播地址候选，用于多源地址/多 VLAN 场景下逐个尝试路由查找。
- * @param family 地址族。
- * @return 本机地址候选列表。
- */
-std::vector<LocalAddressCandidate> ListLocalAddressCandidates(int family)
-{
-    std::vector<LocalAddressCandidate> candidates;
-    IfaddrsGuard ifaddrsGuard;
-    if (::getifaddrs(ifaddrsGuard.out()) != 0) {
-        std::cerr << "ListLocalAddressCandidates: getifaddrs failed" << std::endl;
-        return candidates;
-    }
-
-    std::unordered_set<std::string> seen;
-    for (ifaddrs* it = ifaddrsGuard.get(); it != nullptr; it = it->ifa_next) {
-        if (it->ifa_name == nullptr || it->ifa_addr == nullptr || it->ifa_addr->sa_family != family) {
-            continue;
-        }
-        if ((it->ifa_flags & IFF_UP) == 0) {
-            continue;
-        }
-
-        char addressText[INET6_ADDRSTRLEN] = {};
-        LocalAddressCandidate candidate;
-        candidate.interfaceName = it->ifa_name;
-        candidate.interfaceIndex = ::if_nametoindex(it->ifa_name);
-        if (candidate.interfaceIndex <= 0 || (it->ifa_flags & IFF_LOOPBACK) != 0) {
-            continue;
-        }
-        if (family == AF_INET) {
-            const auto* in = reinterpret_cast<const sockaddr_in*>(it->ifa_addr);
-            candidate.v4 = in->sin_addr;
-            if (::inet_ntop(AF_INET, &candidate.v4, addressText, sizeof(addressText)) == nullptr) {
-                continue;
-            }
-        } else if (family == AF_INET6) {
-            const auto* in6 = reinterpret_cast<const sockaddr_in6*>(it->ifa_addr);
-            candidate.v6 = in6->sin6_addr;
-            if (IN6_IS_ADDR_LINKLOCAL(&candidate.v6) || IN6_IS_ADDR_MULTICAST(&candidate.v6)) {
-                continue;
-            }
-            if (::inet_ntop(AF_INET6, &candidate.v6, addressText, sizeof(addressText)) == nullptr) {
-                continue;
-            }
-        } else {
-            continue;
-        }
-
-        const std::string key = candidate.interfaceName + "|" + addressText;
-        if (!seen.insert(key).second) {
-            continue;
-        }
-        candidates.push_back(candidate);
-    }
-    return candidates;
 }
 
 /**
@@ -923,13 +861,17 @@ std::optional<RouteInfo> FindGatewayRoute(int family,
                                           const in6_addr& v6)
 {
     NetlinkSocket sock;
-    if (sock.get() < 0) {
-        std::cerr << "FindGatewayRoute: socket(AF_NETLINK) failed" << std::endl;
+    if (sock.get() < NO_0) {
+        const int savedErrno = errno;
+        std::cerr << "FindGatewayRoute: socket(AF_NETLINK) failed, errno="
+                  << FormatErrno(savedErrno) << std::endl;
         return std::nullopt;
     }
 
     if (!SendRouteLookupRequest(sock, options, family, v4, v6)) {
-        std::cerr << "FindGatewayRoute: sendto(RTM_GETROUTE) failed" << std::endl;
+        const int savedErrno = errno;
+        std::cerr << "FindGatewayRoute: sendto(RTM_GETROUTE) failed, errno="
+                  << FormatErrno(savedErrno) << std::endl;
         return std::nullopt;
     }
 
@@ -957,21 +899,18 @@ std::optional<RouteInfo> FindGatewayRoute(int family,
             continue;
         }
 
-        const int payloadLen = nlh->nlmsg_len - NLMSG_LENGTH(sizeof(*rtm));
-        if (payloadLen < 0) {
+        const auto payloadLen = NetlinkPayloadLength(nlh, sizeof(*rtm));
+        if (!payloadLen.has_value()) {
             continue;
         }
 
         const rtattr* attr = reinterpret_cast<const rtattr*>(
             reinterpret_cast<const char*>(rtm) + NLMSG_ALIGN(sizeof(*rtm)));
-        auto parsed = ParseRouteAttrs(rtm, family, attr, payloadLen);
-        if (!parsed.has_value() || !RouteMatchesTarget(*parsed)) {
+        auto parsed = ParseRouteAttrs(rtm, family, attr, *payloadLen);
+        if (!parsed.has_value() || !parsed->hasOif) {
             continue;
         }
-        if (options.tableId != RT_TABLE_UNSPEC && parsed->tableId != options.tableId) {
-            continue;
-        }
-        return BuildRouteInfo(rtm, family, *parsed);
+        return BuildRouteInfo(family, *parsed);
     }
 
     std::cerr << "FindGatewayRoute: no matching gateway route found" << std::endl;
@@ -990,7 +929,7 @@ std::optional<MacLookupResult> FindLocalInterfaceMac(int family,
                                                      const in6_addr& v6)
 {
     IfaddrsGuard ifaddrsGuard;
-    if (::getifaddrs(ifaddrsGuard.out()) != 0) {
+    if (::getifaddrs(ifaddrsGuard.out()) != NO_0) {
         std::cerr << "FindLocalInterfaceMac: getifaddrs failed" << std::endl;
         return std::nullopt;
     }
@@ -1005,7 +944,7 @@ std::optional<MacLookupResult> FindLocalInterfaceMac(int family,
 
         if (it->ifa_addr->sa_family == AF_PACKET) {
             const auto* sll = reinterpret_cast<const sockaddr_ll*>(it->ifa_addr);
-            if (sll->sll_halen == 6) {
+            if (sll->sll_halen == NO_6) {
                 macByName[it->ifa_name] = FormatMac(sll->sll_addr, sll->sll_halen);
             }
             continue;
@@ -1036,7 +975,7 @@ std::optional<MacLookupResult> FindNeighborMac(int family,
                                                const in6_addr& v6)
 {
     NetlinkSocket sock;
-    if (sock.get() < 0) {
+    if (sock.get() < NO_0) {
         std::cerr << "FindNeighborMac: socket(AF_NETLINK) failed" << std::endl;
         return std::nullopt;
     }
@@ -1066,8 +1005,6 @@ std::optional<MacLookupResult> FindNeighborMac(int family,
              nlh = NLMSG_NEXT(nlh, remaining)) {
             if (nlh->nlmsg_type == NLMSG_DONE) {
                 receiving = false;
-                std::cerr << "FindNeighborMac: neighbor cache lookup completed without a match"
-                          << std::endl;
                 return std::nullopt;
             }
 
@@ -1124,18 +1061,22 @@ std::optional<MacLookupResult> FindRoutedMac(int family,
     in6_addr gatewayV6{};
     const int gatewayFamily = DetectFamily(route->gatewayIp, &gatewayV4, &gatewayV6);
     if (gatewayFamily == AF_UNSPEC) {
-        std::cerr << "FindRoutedMac: gateway IP is invalid: " << route->gatewayIp << std::endl;
+        std::cerr << "FindRoutedMac: gateway IP is invalid" << std::endl;
         return std::nullopt;
     }
 
     auto gatewayMac = FindNeighborMac(gatewayFamily, route->interfaceIndex, gatewayV4, gatewayV6);
     if (!gatewayMac.has_value()) {
         gatewayMac =
-            RetryNeighborLookupAfterProbe(family, route->interfaceIndex, options, v4, v6);
+            RetryNeighborLookupAfterProbe(gatewayFamily,
+                                          route->interfaceIndex,
+                                          options,
+                                          gatewayV4,
+                                          gatewayV6);
     }
     if (!gatewayMac.has_value()) {
-        std::cerr << "FindRoutedMac: gateway neighbor MAC lookup failed for " << route->gatewayIp
-                  << " on " << route->interfaceName << std::endl;
+        std::cerr << "FindRoutedMac: gateway neighbor MAC lookup failed on "
+                  << route->interfaceName << std::endl;
         return std::nullopt;
     }
 
@@ -1149,85 +1090,79 @@ std::optional<MacLookupResult> FindRoutedMac(int family,
  * @param ip 目标 IP 字符串。
  * @return 解析成功返回 MAC 查询结果，否则返回空 optional。
  */
-std::optional<MacLookupResult> ResolveMacAddress(const std::string& ip,
-                                                 const RouteLookupOptions& initialOptions)
+std::optional<MacLookupResult> ResolveMacAddressWithRoute(const ParsedIpLiteral& tcpSourceIp,
+                                                          const RouteLookupOptions& options)
 {
-    in_addr v4{};
-    in6_addr v6{};
-    const int family = DetectFamily(ip, &v4, &v6);
-    if (family == AF_UNSPEC) {
-        std::cerr << "ResolveMacAddress: invalid IPv4/IPv6 address" << std::endl;
+    if (tcpSourceIp.family == AF_UNSPEC) {
+        std::cerr << "ResolveMacAddressWithRoute: invalid tcp source IP" << std::endl;
         return std::nullopt;
     }
 
-    RouteLookupOptions options = initialOptions;
-
-    if (auto local = FindLocalInterfaceMac(family, v4, v6)) {
+    if (auto local = FindLocalInterfaceMac(tcpSourceIp.family, tcpSourceIp.v4, tcpSourceIp.v6)) {
         return local;
     }
 
-    if (auto neighbor = FindNeighborMac(family, 0, v4, v6)) {
+    if (auto neighbor = FindNeighborMac(tcpSourceIp.family, NO_0, tcpSourceIp.v4, tcpSourceIp.v6)) {
         return neighbor;
     }
 
-    if (!options.hasSource && DetectPreferredSource(family, v4, v6, &options)) {
-        auto routed = FindRoutedMac(family, options, v4, v6);
-        if (routed.has_value()) {
-            return routed;
-        }
+    auto routed = FindRoutedMac(tcpSourceIp.family, options, tcpSourceIp.v4, tcpSourceIp.v6);
+    if (routed.has_value()) {
+        return routed;
     }
 
-    for (const auto& candidate : ListLocalAddressCandidates(family)) {
-        RouteLookupOptions candidateOptions = initialOptions;
-        candidateOptions.hasSource = true;
-        candidateOptions.outputInterfaceIndex = candidate.interfaceIndex;
-        if (family == AF_INET) {
-            candidateOptions.sourceV4 = candidate.v4;
-        } else {
-            candidateOptions.sourceV6 = candidate.v6;
-        }
-        auto routed = FindRoutedMac(family, candidateOptions, v4, v6);
-        if (routed.has_value()) {
-            return routed;
-        }
-    }
-
-    std::cerr << "ResolveMacAddress: unable to resolve MAC address for target: " << ip
+    std::cerr << "ResolveMacAddressWithRoute: explicit local service IP route lookup failed"
               << std::endl;
     return std::nullopt;
+}
+
+std::optional<MacLookupResult> ResolveMacAddress(const MacResolveRequest& request)
+{
+    if (request.tcpSourceIp.family == AF_UNSPEC) {
+        std::cerr << "ResolveMacAddress: invalid tcp source IP" << std::endl;
+        return std::nullopt;
+    }
+
+    const auto sourceOptions =
+        BuildSourceRouteOptions(request.localServiceIp, request.tcpSourceIp.family);
+    if (!sourceOptions.has_value()) {
+        return std::nullopt;
+    }
+
+    return ResolveMacAddressWithRoute(request.tcpSourceIp, *sourceOptions);
 }
 
 /**
  * @brief 程序入口函数。
  * @param argc 命令行参数个数。
  * @param argv 命令行参数数组。
- * @return 成功返回 0，参数错误返回 1，未找到 MAC 返回 2。
+ * @return 成功返回 NO_0，参数错误返回 NO_1，未找到 MAC 返回 NO_2。
  */
 int main(int argc, char* argv[])
 {
-    if (argc == 2 && (std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h")) {
-        PrintUsage(argv[0]);
-        return 0;
+    if (argc == NO_2 && (std::string(argv[NO_1]) == "--help" || std::string(argv[NO_1]) == "-h")) {
+        PrintUsage(argv[NO_0]);
+        return NO_0;
     }
 
-    if (argc != 2) {
-        PrintUsage(argv[0]);
-        return 1;
+    if (argc != NO_3) {
+        PrintUsage(argv[NO_0]);
+        return NO_1;
     }
 
-    const auto result = ResolveMacAddress(argv[1], RouteLookupOptions{});
+    const MacResolveRequest request = BuildMacResolveRequest(argv[NO_1], argv[NO_2]);
+    const auto result = ResolveMacAddress(request);
     if (!result.has_value()) {
         std::cerr
             << "MAC address not found.\n"
             << "The IP may be invalid, off-link, its ARP/NDP neighbor entry may be absent, "
             << "the policy route may depend on unavailable kernel context, "
             << "or the gateway neighbor entry may not be in the kernel cache.\n";
-        return 2;
+        return NO_2;
     }
 
-    std::cout << "IP: " << argv[1] << '\n'
-              << "MAC: " << result->macAddress << '\n'
+    std::cout << "MAC: " << result->macAddress << '\n'
               << "Interface: " << result->interfaceName << '\n'
               << "Source: " << SourceToString(result->source) << '\n';
-    return 0;
+    return NO_0;
 }
