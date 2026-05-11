@@ -8,6 +8,7 @@
 #include <netpacket/packet.h>
 #include <sys/socket.h>
 #include <sys/time.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -495,8 +496,18 @@ bool ReceiveNetlinkBuffer(NetlinkSocket& sock, std::vector<char>* buffer)
     bool retry = true;
     while (retry) {
         buffer->resize(kNetlinkBufferSize);
-        const ssize_t received = ::recv(sock.get(), buffer->data(), buffer->size(), NO_0);
+        iovec iov{};
+        iov.iov_base = buffer->data();
+        iov.iov_len = buffer->size();
+        msghdr msg{};
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = NO_1;
+        const ssize_t received = ::recvmsg(sock.get(), &msg, NO_0);
         if (received >= NO_0) {
+            if ((msg.msg_flags & MSG_TRUNC) != NO_0) {
+                std::cerr << "ReceiveNetlinkBuffer: netlink message truncated" << std::endl;
+                return false;
+            }
             buffer->resize(static_cast<std::size_t>(received));
             return true;
         }
@@ -1110,6 +1121,9 @@ std::optional<MacLookupResult> QueryNeighborMac(int family,
              NLMSG_OK(nlh, remaining);
              nlh = NLMSG_NEXT(nlh, remaining)) {
             if (nlh->nlmsg_type == NLMSG_DONE) {
+                if ((nlh->nlmsg_flags & NLM_F_DUMP_INTR) != NO_0) {
+                    std::cerr << "FindNeighborMac: dump interrupted" << std::endl;
+                }
                 receiving = false;
                 return std::nullopt;
             }
@@ -1123,6 +1137,10 @@ std::optional<MacLookupResult> QueryNeighborMac(int family,
             if (result.has_value()) {
                 return result;
             }
+        }
+
+        if (useTargetedRequest) {
+            return std::nullopt;
         }
     }
     return std::nullopt;
